@@ -1,0 +1,39 @@
+name: Sync RevenueCat and Windsor
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger sync
+        env:
+          CMO_SYNC_URL: ${{ secrets.CMO_SYNC_URL }}
+          CMO_SYNC_SECRET: ${{ secrets.CMO_SYNC_SECRET }}
+        run: |
+          set -euo pipefail
+
+          : "${CMO_SYNC_URL:?Set the CMO_SYNC_URL repository secret}"
+          : "${CMO_SYNC_SECRET:?Set the CMO_SYNC_SECRET repository secret}"
+
+          response_file="$(mktemp)"
+          http_code="$(
+            curl --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${CMO_SYNC_SECRET}" \
+              --output "${response_file}" \
+              --write-out "%{http_code}" \
+              "${CMO_SYNC_URL}"
+          )"
+
+          if [[ ! "${http_code}" =~ ^2 ]]; then
+            echo "Sync request failed with HTTP ${http_code}" >&2
+            cat "${response_file}" >&2
+            exit 1
+          fi
+
+          cat "${response_file}"

@@ -63,8 +63,7 @@ Set:
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key, server only.
 - `NEXT_PUBLIC_SUPABASE_URL`: Supabase project URL.
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: Supabase publishable key.
-- `SYNC_SECRET`: shared secret for manual sync API routes.
-- `CRON_SECRET`: optional Vercel Cron secret. If set in Vercel, Vercel sends it as `Authorization: Bearer`.
+- `SYNC_SECRET`: shared secret for protected sync API routes and the GitHub Actions scheduler.
 - `USD_TO_INR`: default `95.22`.
 
 5. Seed apps
@@ -86,20 +85,24 @@ Open `http://localhost:3000`.
 7. Manually run sync
 
 ```bash
-curl -X POST "http://localhost:3000/api/sync/revenuecat?secret=$SYNC_SECRET"
-curl -X POST "http://localhost:3000/api/sync/windsor?secret=$SYNC_SECRET"
-curl -X POST "http://localhost:3000/api/sync/all?secret=$SYNC_SECRET"
+curl -X POST "http://localhost:3000/api/sync/revenuecat" \
+  -H "Authorization: Bearer $SYNC_SECRET"
+curl -X POST "http://localhost:3000/api/sync/windsor" \
+  -H "Authorization: Bearer $SYNC_SECRET"
+curl -X POST "http://localhost:3000/api/sync/all" \
+  -H "Authorization: Bearer $SYNC_SECRET"
 ```
 
 Optional date range:
 
 ```bash
-curl -X POST "http://localhost:3000/api/sync/all?secret=$SYNC_SECRET&date_from=2026-07-01&date_to=2026-07-06"
+curl -X POST "http://localhost:3000/api/sync/all?date_from=2026-07-01&date_to=2026-07-06" \
+  -H "Authorization: Bearer $SYNC_SECRET"
 ```
 
 8. Deploy to Vercel
 
-Set all env vars in Vercel. Only `NEXT_PUBLIC_*` values are exposed to the browser. `SUPABASE_SERVICE_ROLE_KEY`, `REVENUECAT_API_KEY`, `WINDSOR_API_KEY`, `SYNC_SECRET`, and `CRON_SECRET` must stay server-only.
+Set the app env vars in Vercel. Only `NEXT_PUBLIC_*` values are exposed to the browser. `SUPABASE_SERVICE_ROLE_KEY`, `REVENUECAT_API_KEY`, `WINDSOR_API_KEY`, and `SYNC_SECRET` must stay server-only.
 
 Required Vercel environment values:
 
@@ -112,7 +115,6 @@ REVENUECAT_API_KEY=<RevenueCat secret API key>
 WINDSOR_API_KEY=<Windsor.ai API key>
 WINDSOR_CONNECTOR=apple_search_ads
 SYNC_SECRET=<random long secret>
-CRON_SECRET=<random long secret, can match SYNC_SECRET>
 USD_TO_INR=95.22
 ```
 
@@ -125,18 +127,35 @@ curl -X POST "https://<your-vercel-domain>/api/sync/all" \
 
 Then open `https://<your-vercel-domain>`.
 
-9. Configure cron
+9. Configure GitHub Actions scheduler
 
-`vercel.json` schedules:
+Vercel only hosts the Next.js app. The every-6-hours sync is triggered by `.github/workflows/sync-all.yml`.
 
-```json
-{
-  "path": "/api/cron/sync-all",
-  "schedule": "0 */6 * * *"
-}
+Add these repository secrets in GitHub Settings > Secrets and variables > Actions:
+
+```txt
+CMO_SYNC_URL=https://<your-vercel-domain>/api/sync/all
+CMO_SYNC_SECRET=<same value as Vercel SYNC_SECRET>
 ```
 
-The cron route accepts `Authorization: Bearer CRON_SECRET`, `Authorization: Bearer SYNC_SECRET`, or `?secret=...`.
+Do not store RevenueCat, Windsor, or Supabase service-role keys in GitHub Actions. GitHub only needs the deployed sync URL and the shared sync secret.
+
+The workflow runs on this UTC schedule:
+
+```yaml
+cron: "0 */6 * * *"
+```
+
+You can also run `Sync RevenueCat and Windsor` manually from the GitHub Actions tab.
+
+After the first successful GitHub Actions run, verify recent sync status in Supabase:
+
+```sql
+select source, status, rows_synced, error_message, sync_started_at
+from public.sync_runs
+order by sync_started_at desc
+limit 20;
+```
 
 ## Verification
 
