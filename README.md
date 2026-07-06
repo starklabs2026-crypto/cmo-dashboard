@@ -21,6 +21,18 @@ Keep all API keys in environment variables. Do not commit `.env.local`.
 
 ## Setup
 
+## Current Connection Status
+
+Supabase schema and app seed data have been applied to `https://skcvmktjwqdgggeqscnq.supabase.co`.
+
+RevenueCat and Windsor.ai are not live-connected until their API keys are added as server-side environment variables. The code is wired to call those services from protected API routes only:
+
+- RevenueCat sync: `POST /api/sync/revenuecat`
+- Windsor.ai sync: `POST /api/sync/windsor`
+- Combined sync: `POST /api/sync/all`
+
+The dashboard never calls RevenueCat or Windsor.ai from the browser. It reads Supabase through Next.js API routes.
+
 1. Install dependencies
 
 ```bash
@@ -88,6 +100,29 @@ curl -X POST "http://localhost:3000/api/sync/all?secret=$SYNC_SECRET&date_from=2
 8. Deploy to Vercel
 
 Set all env vars in Vercel. Only `NEXT_PUBLIC_*` values are exposed to the browser. `SUPABASE_SERVICE_ROLE_KEY`, `REVENUECAT_API_KEY`, `WINDSOR_API_KEY`, `SYNC_SECRET`, and `CRON_SECRET` must stay server-only.
+
+Required Vercel environment values:
+
+```txt
+SUPABASE_URL=https://skcvmktjwqdgggeqscnq.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<from Supabase dashboard, server only>
+NEXT_PUBLIC_SUPABASE_URL=https://skcvmktjwqdgggeqscnq.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<Supabase publishable key>
+REVENUECAT_API_KEY=<RevenueCat secret API key>
+WINDSOR_API_KEY=<Windsor.ai API key>
+SYNC_SECRET=<random long secret>
+CRON_SECRET=<random long secret, can match SYNC_SECRET>
+USD_TO_INR=95.22
+```
+
+After deployment, run a manual sync:
+
+```bash
+curl -X POST "https://<your-vercel-domain>/api/sync/all" \
+  -H "Authorization: Bearer <SYNC_SECRET>"
+```
+
+Then open `https://<your-vercel-domain>`.
 
 9. Configure cron
 
