@@ -110,6 +110,7 @@ NEXT_PUBLIC_SUPABASE_URL=https://skcvmktjwqdgggeqscnq.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<Supabase publishable key>
 REVENUECAT_API_KEY=<RevenueCat secret API key>
 WINDSOR_API_KEY=<Windsor.ai API key>
+WINDSOR_CONNECTOR=apple_search_ads
 SYNC_SECRET=<random long secret>
 CRON_SECRET=<random long secret, can match SYNC_SECRET>
 USD_TO_INR=95.22
