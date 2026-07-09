@@ -31,6 +31,36 @@ describe("RevenueCat chart series extraction", () => {
     expect(series.get("2026-07-09")).toBe(8.25);
   });
 
+  it("keeps the preferred measure from flattened object chart values", () => {
+    const series = extractRevenueCatDailySeries(
+      {
+        values: [
+          { date: "2026-07-09", display_name: "Proceeds", value: 12.5 },
+          { date: "2026-07-09", display_name: "Transactions", value: 3 },
+          { date: "2026-07-09", display_name: "Ad Impressions", value: 0 }
+        ]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(series.get("2026-07-09")).toBe(12.5);
+  });
+
+  it("keeps the preferred measure from flattened array chart values", () => {
+    const series = extractRevenueCatDailySeries(
+      {
+        values: [
+          ["2026-07-09", "Proceeds", 12.5],
+          ["2026-07-09", "Transactions", 3],
+          ["2026-07-09", "Ad Impressions", 0]
+        ]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(series.get("2026-07-09")).toBe(12.5);
+  });
+
   it("detects whether a chart series has non-zero values", () => {
     expect(hasNonZeroRevenueCatSeries(new Map([["2026-07-09", 0]]))).toBe(false);
     expect(hasNonZeroRevenueCatSeries(new Map([["2026-07-09", 2.5]]))).toBe(true);

@@ -2,6 +2,22 @@ import { toFiniteNumber } from "@/lib/sync/money";
 
 const DATE_KEYS = new Set(["date", "start_date", "end_date", "timestamp", "period"]);
 const MEASURE_KEYS = ["id", "key", "name", "display_name", "label", "title"];
+const POINT_MEASURE_KEYS = [
+  "measure",
+  "measure_id",
+  "measure_key",
+  "measure_name",
+  "metric",
+  "metric_id",
+  "metric_name",
+  "name",
+  "display_name",
+  "label",
+  "title",
+  "series",
+  "series_name"
+];
+const NON_VALUE_KEYS = new Set([...DATE_KEYS, ...POINT_MEASURE_KEYS, "object", "category", "unit"]);
 const SENSITIVE_KEY_PATTERN = /api[_-]?key|authorization|secret|token/i;
 const SENSITIVE_VALUE_PATTERN = /^(sk_|Bearer\s+)/i;
 
@@ -72,23 +88,89 @@ function measureText(measure: Record<string, unknown>): string {
     .join(" ");
 }
 
-function getPreferredMeasureValueIndex(payload: unknown, preferredKeys: string[]): number | null {
+function getMeasures(payload: unknown): Record<string, unknown>[] {
   if (!payload || typeof payload !== "object") {
-    return null;
+    return [];
   }
 
   const measures = (payload as { measures?: unknown }).measures;
-  if (!Array.isArray(measures)) {
+  return Array.isArray(measures)
+    ? measures.filter((measure): measure is Record<string, unknown> => Boolean(measure && typeof measure === "object"))
+    : [];
+}
+
+function matchesPreferredMeasureText(text: string, preferredKeys: string[]): boolean {
+  const normalizedText = normalizeSearchText(text);
+  return preferredKeys
+    .map(normalizeSearchText)
+    .filter(Boolean)
+    .some((key) => normalizedText.includes(key));
+}
+
+function describeMeasureValue(value: unknown): string | null {
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+
+  if (value && typeof value === "object") {
+    return measureText(value as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function getArrayMeasureIndexText(point: unknown[], measures: Record<string, unknown>[]): string {
+  const indexCandidate = Number(point[1]);
+  if (!Number.isInteger(indexCandidate)) {
+    return "";
+  }
+
+  const candidateMeasures = [measures[indexCandidate], measures[indexCandidate - 1]].filter(
+    (measure): measure is Record<string, unknown> => Boolean(measure)
+  );
+
+  return candidateMeasures.map(measureText).filter(Boolean).join(" ");
+}
+
+function getPointMeasureText(point: unknown, measures: Record<string, unknown>[]): string {
+  if (Array.isArray(point)) {
+    const labelText = point
+      .slice(1)
+      .filter((value): value is string => typeof value === "string")
+      .filter((value) => !normalizeDateToken(value) && !isNumericCandidate(value))
+      .join(" ");
+
+    return labelText || getArrayMeasureIndexText(point, measures);
+  }
+
+  if (point && typeof point === "object") {
+    const record = point as Record<string, unknown>;
+    return POINT_MEASURE_KEYS.map((key) => describeMeasureValue(record[key]))
+      .filter((value): value is string => Boolean(value))
+      .join(" ");
+  }
+
+  return "";
+}
+
+function isArrayMeasureIndex(point: unknown[], index: number, measures: Record<string, unknown>[]): boolean {
+  if (index !== 1 || measures.length === 0) {
+    return false;
+  }
+
+  const value = Number(point[index]);
+  return Number.isInteger(value) && Boolean(measures[value] || measures[value - 1]);
+}
+
+function getPreferredMeasureValueIndex(payload: unknown, preferredKeys: string[]): number | null {
+  const measures = getMeasures(payload);
+  if (measures.length === 0) {
     return null;
   }
 
   const normalizedKeys = preferredKeys.map(normalizeSearchText);
   const measureIndex = measures.findIndex((measure) => {
-    if (!measure || typeof measure !== "object") {
-      return false;
-    }
-
-    const text = normalizeSearchText(measureText(measure as Record<string, unknown>));
+    const text = normalizeSearchText(measureText(measure));
     return normalizedKeys.some((key) => text.includes(key));
   });
 
@@ -98,17 +180,21 @@ function getPreferredMeasureValueIndex(payload: unknown, preferredKeys: string[]
 function pickNumericValue(
   point: unknown,
   preferredKeys: string[],
-  preferredMeasureValueIndex: number | null
+  preferredMeasureValueIndex: number | null,
+  measures: Record<string, unknown>[]
 ): number {
   if (Array.isArray(point)) {
     if (
       preferredMeasureValueIndex !== null &&
+      !isArrayMeasureIndex(point, preferredMeasureValueIndex, measures) &&
       isNumericCandidate(point[preferredMeasureValueIndex])
     ) {
       return toFiniteNumber(point[preferredMeasureValueIndex]);
     }
 
-    const numeric = point.slice(1).find(isNumericCandidate);
+    const numeric = point
+      .slice(1)
+      .find((value, index) => !isArrayMeasureIndex(point, index + 1, measures) && isNumericCandidate(value));
     return toFiniteNumber(numeric);
   }
 
@@ -121,7 +207,7 @@ function pickNumericValue(
     }
 
     const fallback = Object.entries(record).find(
-      ([key, value]) => !DATE_KEYS.has(key) && isNumericCandidate(value)
+      ([key, value]) => !NON_VALUE_KEYS.has(key.toLowerCase()) && isNumericCandidate(value)
     );
     return toFiniteNumber(fallback?.[1]);
   }
@@ -153,16 +239,26 @@ export function extractRevenueCatDailySeries(
 ): Map<string, number> {
   const values = payload && typeof payload === "object" ? (payload as { values?: unknown }).values : undefined;
   const sourceValues = Array.isArray(values) ? values : [];
+  const measures = getMeasures(payload);
   const preferredMeasureValueIndex = getPreferredMeasureValueIndex(payload, preferredKeys);
+  const shouldFilterByPointMeasure = sourceValues.some((point) =>
+    matchesPreferredMeasureText(getPointMeasureText(point, measures), preferredKeys)
+  );
   const series = new Map<string, number>();
 
   for (const point of sourceValues) {
+    const pointMeasureText = getPointMeasureText(point, measures);
+    if (shouldFilterByPointMeasure && !matchesPreferredMeasureText(pointMeasureText, preferredKeys)) {
+      continue;
+    }
+
     const date = pickDate(point);
     if (!date) {
       continue;
     }
 
-    series.set(date, pickNumericValue(point, preferredKeys, preferredMeasureValueIndex));
+    const value = pickNumericValue(point, preferredKeys, preferredMeasureValueIndex, measures);
+    series.set(date, shouldFilterByPointMeasure ? (series.get(date) ?? 0) + value : value);
   }
 
   return series;
