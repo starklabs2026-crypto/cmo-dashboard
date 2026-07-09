@@ -52,6 +52,30 @@ type ArrayMeasureSpec = {
   matchedMeasure: string | null;
 };
 
+type FlatPrimitiveLayout = "date-major" | "measure-major";
+
+type PreferredMeasureMatch = {
+  index: number;
+  matchedMeasure: string;
+  summaryTotal: number | null;
+};
+
+type FlatPrimitiveCandidate = {
+  layout: FlatPrimitiveLayout;
+  values: number[];
+  sum: number;
+  difference: number | null;
+};
+
+type FlatPrimitiveAnalysis = {
+  dates: string[];
+  measureCount: number;
+  lengthMatches: boolean;
+  measure: PreferredMeasureMatch | null;
+  candidates: FlatPrimitiveCandidate[];
+  selected: FlatPrimitiveCandidate | null;
+};
+
 function normalizeDateToken(value: unknown): string | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     const timestamp = value < 1_000_000_000_000 ? value * 1000 : value;
@@ -85,6 +109,23 @@ function getPayloadDateBounds(payload: unknown): DateBounds {
     startMs: dateTokenToMs(normalizeDateToken(record.start_date)),
     endMs: dateTokenToMs(normalizeDateToken(record.end_date))
   };
+}
+
+function enumerateBoundDates(bounds: DateBounds): string[] {
+  if (bounds.startMs === null || bounds.endMs === null || bounds.endMs < bounds.startMs) {
+    return [];
+  }
+
+  const startMs = bounds.startMs;
+  const endMs = bounds.endMs;
+  const dayCount = Math.floor((endMs - startMs) / DAY_MS) + 1;
+  if (dayCount < 1 || dayCount > 5000) {
+    return [];
+  }
+
+  return Array.from({ length: dayCount }, (_, index) =>
+    new Date(startMs + index * DAY_MS).toISOString().slice(0, 10)
+  );
 }
 
 function isSmallNumericDateLike(value: unknown): boolean {
@@ -170,6 +211,13 @@ function measureText(measure: Record<string, unknown>): string {
     .join(" ");
 }
 
+function measureAliases(measure: Record<string, unknown>): string[] {
+  return MEASURE_KEYS.map((key) => measure[key])
+    .filter((value): value is string | number => typeof value === "string" || typeof value === "number")
+    .map(String)
+    .filter(Boolean);
+}
+
 function getMeasures(payload: unknown): Record<string, unknown>[] {
   if (!payload || typeof payload !== "object") {
     return [];
@@ -187,6 +235,14 @@ function matchesPreferredMeasureText(text: string, preferredKeys: string[]): boo
     .map(normalizeSearchText)
     .filter(Boolean)
     .some((key) => normalizedText.includes(key));
+}
+
+function getPreferredMeasureRank(text: string, preferredKeys: string[]): number | null {
+  const normalizedText = normalizeSearchText(text);
+  const rank = preferredKeys
+    .map(normalizeSearchText)
+    .findIndex((key) => key.length > 0 && normalizedText.includes(key));
+  return rank >= 0 ? rank : null;
 }
 
 function describeMeasureValue(value: unknown): string | null {
@@ -348,6 +404,67 @@ function getPreferredMeasureValueIndex(payload: unknown, preferredKeys: string[]
   return measureIndex >= 0 ? measureIndex + 1 : null;
 }
 
+function getSummaryTotalRecord(payload: unknown): Record<string, unknown> | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const summary = (payload as { summary?: unknown }).summary;
+  if (!summary || typeof summary !== "object") {
+    return null;
+  }
+
+  const total = (summary as { total?: unknown }).total;
+  return total && typeof total === "object" && !Array.isArray(total) ? (total as Record<string, unknown>) : null;
+}
+
+function getMeasureSummaryTotal(payload: unknown, measure: Record<string, unknown>): number | null {
+  const total = getSummaryTotalRecord(payload);
+  if (!total) {
+    return null;
+  }
+
+  for (const alias of measureAliases(measure)) {
+    if (alias in total && isNumericCandidate(total[alias])) {
+      return toFiniteNumber(total[alias]);
+    }
+  }
+
+  const normalizedAliases = new Set(measureAliases(measure).map(normalizeSearchText));
+  const normalizedMatch = Object.entries(total).find(
+    ([key, value]) => normalizedAliases.has(normalizeSearchText(key)) && isNumericCandidate(value)
+  );
+
+  return normalizedMatch ? toFiniteNumber(normalizedMatch[1]) : null;
+}
+
+function getPreferredMeasureMatch(
+  payload: unknown,
+  measures: Record<string, unknown>[],
+  preferredKeys: string[]
+): PreferredMeasureMatch | null {
+  const matches = measures
+    .map((measure, index) => ({
+      index,
+      measure,
+      rank: getPreferredMeasureRank(measureText(measure), preferredKeys)
+    }))
+    .filter((match): match is { index: number; measure: Record<string, unknown>; rank: number } => match.rank !== null)
+    .sort((left, right) => left.rank - right.rank || left.index - right.index);
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  const selected = matches[0];
+
+  return {
+    index: selected.index,
+    matchedMeasure: measureText(selected.measure),
+    summaryTotal: getMeasureSummaryTotal(payload, selected.measure)
+  };
+}
+
 function pickNumericValue(
   point: unknown,
   preferredKeys: string[],
@@ -450,12 +567,137 @@ function getArrayValueIndex(
   return match?.index ?? null;
 }
 
+function isFlatPrimitiveValues(values: unknown[]): boolean {
+  return values.length > 0 && values.every((value) => !Array.isArray(value) && (value === null || typeof value !== "object"));
+}
+
+function valuesNearlyEqual(left: number, right: number): boolean {
+  return Math.abs(left - right) <= Math.max(0.01, Math.abs(right) * 0.000001);
+}
+
+function flatCandidateValues(
+  values: unknown[],
+  dates: string[],
+  measureCount: number,
+  measureIndex: number,
+  layout: FlatPrimitiveLayout
+): number[] {
+  return dates.map((_, dateIndex) => {
+    const valueIndex =
+      layout === "date-major"
+        ? dateIndex * measureCount + measureIndex
+        : measureIndex * dates.length + dateIndex;
+    return toFiniteNumber(values[valueIndex]);
+  });
+}
+
+function flatCandidateSeriesMatch(left: FlatPrimitiveCandidate, right: FlatPrimitiveCandidate): boolean {
+  return left.values.length === right.values.length && left.values.every((value, index) => valuesNearlyEqual(value, right.values[index]));
+}
+
+function analyzeFlatPrimitiveValues(
+  payload: unknown,
+  values: unknown[],
+  measures: Record<string, unknown>[],
+  bounds: DateBounds,
+  preferredKeys: string[]
+): FlatPrimitiveAnalysis | null {
+  if (!isFlatPrimitiveValues(values)) {
+    return null;
+  }
+
+  const dates = enumerateBoundDates(bounds);
+  const measureCount = measures.length;
+  const lengthMatches = dates.length > 0 && measureCount > 0 && values.length === dates.length * measureCount;
+  const measure = getPreferredMeasureMatch(payload, measures, preferredKeys);
+
+  if (!lengthMatches || !measure) {
+    return {
+      dates,
+      measureCount,
+      lengthMatches,
+      measure,
+      candidates: [],
+      selected: null
+    };
+  }
+
+  const candidates = (["date-major", "measure-major"] as const).map((layout) => {
+    const candidateValues = flatCandidateValues(values, dates, measureCount, measure.index, layout);
+    const sum = candidateValues.reduce((total, value) => total + value, 0);
+    return {
+      layout,
+      values: candidateValues,
+      sum,
+      difference: measure.summaryTotal === null ? null : Math.abs(sum - measure.summaryTotal)
+    };
+  });
+
+  if (measure.summaryTotal === null) {
+    return { dates, measureCount, lengthMatches, measure, candidates, selected: null };
+  }
+
+  const summaryMatches = candidates.filter((candidate) => valuesNearlyEqual(candidate.sum, measure.summaryTotal ?? 0));
+  const selected =
+    summaryMatches.length === 1
+      ? summaryMatches[0]
+      : summaryMatches.length > 1 && flatCandidateSeriesMatch(summaryMatches[0], summaryMatches[1])
+        ? summaryMatches[0]
+        : null;
+
+  return { dates, measureCount, lengthMatches, measure, candidates, selected };
+}
+
+function extractFlatPrimitiveSeries(
+  payload: unknown,
+  values: unknown[],
+  measures: Record<string, unknown>[],
+  bounds: DateBounds,
+  preferredKeys: string[]
+): Map<string, number> | null {
+  const analysis = analyzeFlatPrimitiveValues(payload, values, measures, bounds, preferredKeys);
+  if (!analysis?.selected) {
+    return null;
+  }
+
+  return new Map(analysis.dates.map((date, index) => [date, analysis.selected?.values[index] ?? 0]));
+}
+
+function primitiveTypeSample(values: unknown[]): string[] {
+  return [
+    ...new Set(
+      values.slice(0, 25).map((value) => (value === null ? "null" : Array.isArray(value) ? "array" : typeof value))
+    )
+  ];
+}
+
 function describeValueShape(
+  payload: unknown,
   values: unknown[],
   measures: Record<string, unknown>[],
   bounds: DateBounds,
   preferredKeys: string[]
 ): Record<string, unknown> | null {
+  const flatPrimitiveAnalysis = analyzeFlatPrimitiveValues(payload, values, measures, bounds, preferredKeys);
+  if (flatPrimitiveAnalysis) {
+    const bestCandidate =
+      flatPrimitiveAnalysis.selected ??
+      [...flatPrimitiveAnalysis.candidates].sort(
+        (left, right) => (left.difference ?? Number.POSITIVE_INFINITY) - (right.difference ?? Number.POSITIVE_INFINITY)
+      )[0];
+
+    return {
+      primitive_values_count: values.length,
+      date_count: flatPrimitiveAnalysis.dates.length,
+      measure_count: flatPrimitiveAnalysis.measureCount,
+      matched_measure: flatPrimitiveAnalysis.measure?.matchedMeasure ?? null,
+      summary_total: flatPrimitiveAnalysis.measure?.summaryTotal ?? null,
+      candidate_layout: bestCandidate?.layout ?? null,
+      candidate_sum: bestCandidate?.sum ?? null,
+      primitive_types: primitiveTypeSample(values)
+    };
+  }
+
   const arrayValues = values.filter((value): value is unknown[] => Array.isArray(value));
   if (arrayValues.length === 0) {
     return null;
@@ -499,6 +741,11 @@ export function extractRevenueCatDailySeries(
   const measures = getMeasures(payload);
   const bounds = getPayloadDateBounds(payload);
   const preferredMeasureValueIndex = getPreferredMeasureValueIndex(payload, preferredKeys);
+  const flatPrimitiveSeries = extractFlatPrimitiveSeries(payload, sourceValues, measures, bounds, preferredKeys);
+  if (flatPrimitiveSeries) {
+    return flatPrimitiveSeries;
+  }
+
   const measureSpec = inferArrayMeasureSpec(sourceValues, measures, preferredKeys);
   const shouldFilterByPointMeasure = sourceValues.some((point) =>
     matchesPreferredMeasureText(getPointMeasureText(point), preferredKeys)
@@ -579,7 +826,7 @@ export function describeRevenueCatChartDiagnostics(
     start_date: getRecordValue(record, "start_date"),
     end_date: getRecordValue(record, "end_date"),
     values_count: Array.isArray(values) ? values.length : 0,
-    value_shape: describeValueShape(sourceValues, measures, bounds, preferredKeys),
+    value_shape: describeValueShape(payload, sourceValues, measures, bounds, preferredKeys),
     measures: redactSensitiveValue("measures", record.measures),
     summary: redactSensitiveValue("summary", record.summary),
     user_selectors: redactSensitiveValue("user_selectors", record.user_selectors),

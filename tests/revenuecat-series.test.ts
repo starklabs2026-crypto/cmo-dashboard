@@ -131,6 +131,81 @@ describe("RevenueCat chart series extraction", () => {
     expect(series.get("2026-01-10")).toBe(12.5);
   });
 
+  it("reads date-major flat primitive chart values using the matched measure summary total", () => {
+    const series = extractRevenueCatDailySeries(
+      {
+        start_date: "2026-07-09",
+        end_date: "2026-07-10",
+        measures: [
+          { display_name: "Gross revenue" },
+          { display_name: "Proceeds" },
+          { display_name: "Transactions" }
+        ],
+        summary: { total: { "Gross revenue": 50, Proceeds: 30, Transactions: 5 } },
+        values: [25, 12.5, 2, 25, 17.5, 3]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(series.get("2026-07-09")).toBe(12.5);
+    expect(series.get("2026-07-10")).toBe(17.5);
+  });
+
+  it("reads measure-major flat primitive chart values using the matched measure summary total", () => {
+    const series = extractRevenueCatDailySeries(
+      {
+        start_date: "2026-07-09",
+        end_date: "2026-07-10",
+        measures: [
+          { display_name: "Gross revenue" },
+          { display_name: "Proceeds" },
+          { display_name: "Transactions" }
+        ],
+        summary: { total: { "Gross revenue": 50, Proceeds: 30, Transactions: 5 } },
+        values: [25, 25, 12.5, 17.5, 2, 3]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(series.get("2026-07-09")).toBe(12.5);
+    expect(series.get("2026-07-10")).toBe(17.5);
+  });
+
+  it("chooses the flat primitive layout whose preferred measure sum matches the summary total", () => {
+    const series = extractRevenueCatDailySeries(
+      {
+        start_date: "2026-07-09",
+        end_date: "2026-07-10",
+        measures: [
+          { display_name: "Gross revenue" },
+          { display_name: "Proceeds" },
+          { display_name: "Transactions" }
+        ],
+        summary: { total: { "Gross revenue": 107, Proceeds: 30, Transactions: 23 } },
+        values: [100, 7, 12.5, 17.5, 11, 12]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(series.get("2026-07-09")).toBe(12.5);
+    expect(series.get("2026-07-10")).toBe(17.5);
+  });
+
+  it("returns no flat primitive series when the values length does not match dates times measures", () => {
+    const series = extractRevenueCatDailySeries(
+      {
+        start_date: "2026-07-09",
+        end_date: "2026-07-10",
+        measures: [{ display_name: "Gross revenue" }, { display_name: "Proceeds" }, { display_name: "Transactions" }],
+        summary: { total: { Proceeds: 30 } },
+        values: [25, 12.5, 2, 25, 17.5]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(series.size).toBe(0);
+  });
+
   it("detects whether a chart series has non-zero values", () => {
     expect(hasNonZeroRevenueCatSeries(new Map([["2026-07-09", 0]]))).toBe(false);
     expect(hasNonZeroRevenueCatSeries(new Map([["2026-07-09", 2.5]]))).toBe(true);
@@ -182,5 +257,32 @@ describe("RevenueCat chart series extraction", () => {
     expect(diagnostics).toContain('"value_index":2');
     expect(diagnostics).toContain('"matched_measure":"Proceeds"');
     expect(diagnostics).not.toContain("[0,1768003200,12.5]");
+  });
+
+  it("describes flat primitive chart value structure without dumping raw values", () => {
+    const diagnostics = describeRevenueCatChartDiagnostics(
+      {
+        start_date: "2026-07-09",
+        end_date: "2026-07-10",
+        measures: [
+          { display_name: "Gross revenue" },
+          { display_name: "Proceeds" },
+          { display_name: "Transactions" }
+        ],
+        summary: { total: { "Gross revenue": 50, Proceeds: 30, Transactions: 5 } },
+        values: [25, 12.5, 2, 25, 17.5, 3]
+      },
+      ["proceeds", "revenue"]
+    );
+
+    expect(diagnostics).toContain('"primitive_values_count":6');
+    expect(diagnostics).toContain('"date_count":2');
+    expect(diagnostics).toContain('"measure_count":3');
+    expect(diagnostics).toContain('"matched_measure":"Proceeds"');
+    expect(diagnostics).toContain('"summary_total":30');
+    expect(diagnostics).toContain('"candidate_layout":"date-major"');
+    expect(diagnostics).toContain('"candidate_sum":30');
+    expect(diagnostics).toContain('"primitive_types":["number"]');
+    expect(diagnostics).not.toContain("[25,12.5,2,25,17.5,3]");
   });
 });
