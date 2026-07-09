@@ -1,7 +1,8 @@
 import "server-only";
 
 import { createSupabaseAdmin } from "@/lib/supabase/server";
-import { getRequiredEnv, getUsdToInr } from "@/lib/server/env";
+import { getUsdToInr } from "@/lib/server/env";
+import { getRevenueCatApiKeyForApp } from "@/lib/sync/revenuecat-keys";
 import { convertUsdToInr, toFiniteNumber } from "@/lib/sync/money";
 import { enumerateDates, getDefaultSyncDateRange } from "@/lib/sync/dates";
 import { finishSyncRun, startSyncRun, type SyncRunResult } from "@/lib/sync/sync-run";
@@ -191,7 +192,6 @@ async function fetchChartSeries(
 export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Promise<SyncRunResult> {
   const supabase = createSupabaseAdmin();
   const runId = await startSyncRun(supabase, "revenuecat");
-  const apiKey = getRequiredEnv("REVENUECAT_API_KEY");
   const fxRate = getUsdToInr();
   const fetcher = options.fetcher ?? fetch;
   const { dateFrom, dateTo } =
@@ -217,6 +217,7 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
         continue;
       }
 
+      const apiKey = getRevenueCatApiKeyForApp(app.app_name, app.revenuecat_project_id);
       const projectId = await resolveProjectId(app.revenuecat_project_id, apiKey, fetcher);
       const [revenue, expectedLtv, refunds, trials, paidConversions, actives, cancellations] =
         await Promise.allSettled([

@@ -57,7 +57,9 @@ cp .env.example .env.local
 
 Set:
 
-- `REVENUECAT_API_KEY`: RevenueCat v2 secret key with charts/metrics permissions.
+- `REVENUECAT_API_KEY`: optional RevenueCat v2 secret key with charts/metrics permissions if one key or OAuth token can access all RevenueCat projects.
+- `REVENUECAT_API_KEY_CADO`, `REVENUECAT_API_KEY_DISHIT`, `REVENUECAT_API_KEY_MEDZY`, `REVENUECAT_API_KEY_CRYLENS`, `REVENUECAT_API_KEY_FERNLY`, `REVENUECAT_API_KEY_RATE_MY_SKIN`: RevenueCat v2 secret keys when each app is in a separate RevenueCat project.
+- `REVENUECAT_API_KEYS`: optional JSON object keyed by dashboard app name or RevenueCat project id, for example `{"Cado":"sk_...","Dishit":"sk_..."}`. Use this instead of the per-app env vars if you prefer one Vercel env value.
 - `WINDSOR_API_KEY`: Windsor.ai API key.
 - `SUPABASE_URL`: Supabase project URL.
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key, server only.
@@ -102,7 +104,7 @@ curl -X POST "http://localhost:3000/api/sync/all?date_from=2026-07-01&date_to=20
 
 8. Deploy to Vercel
 
-Set the app env vars in Vercel. Only `NEXT_PUBLIC_*` values are exposed to the browser. `SUPABASE_SERVICE_ROLE_KEY`, `REVENUECAT_API_KEY`, `WINDSOR_API_KEY`, and `SYNC_SECRET` must stay server-only.
+Set the app env vars in Vercel. Only `NEXT_PUBLIC_*` values are exposed to the browser. `SUPABASE_SERVICE_ROLE_KEY`, RevenueCat secret keys, `WINDSOR_API_KEY`, and `SYNC_SECRET` must stay server-only.
 
 Required Vercel environment values:
 
@@ -111,12 +113,20 @@ SUPABASE_URL=https://skcvmktjwqdgggeqscnq.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<from Supabase dashboard, server only>
 NEXT_PUBLIC_SUPABASE_URL=https://skcvmktjwqdgggeqscnq.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<Supabase publishable key>
-REVENUECAT_API_KEY=<RevenueCat secret API key>
+REVENUECAT_API_KEY=<optional all-project RevenueCat secret key or OAuth token>
+REVENUECAT_API_KEY_CADO=<Cado RevenueCat secret API key>
+REVENUECAT_API_KEY_DISHIT=<Dishit RevenueCat secret API key>
+REVENUECAT_API_KEY_MEDZY=<Medzy RevenueCat secret API key>
+REVENUECAT_API_KEY_CRYLENS=<Crylens RevenueCat secret API key>
+REVENUECAT_API_KEY_FERNLY=<Fernly RevenueCat secret API key>
+REVENUECAT_API_KEY_RATE_MY_SKIN=<Rate My Skin RevenueCat secret API key>
 WINDSOR_API_KEY=<Windsor.ai API key>
 WINDSOR_CONNECTOR=apple_search_ads
 SYNC_SECRET=<random long secret>
 USD_TO_INR=95.22
 ```
+
+If you set the six `REVENUECAT_API_KEY_*` values, `REVENUECAT_API_KEY` can be left empty. The sync chooses an app-specific key first, then a project-specific key, then `REVENUECAT_API_KEYS`, then the shared `REVENUECAT_API_KEY` fallback.
 
 After deployment, run a manual sync:
 
