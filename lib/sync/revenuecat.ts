@@ -3,7 +3,12 @@ import "server-only";
 import { createSupabaseAdmin } from "@/lib/supabase/server";
 import { getUsdToInr } from "@/lib/server/env";
 import { getRevenueCatApiKeyForApp } from "@/lib/sync/revenuecat-keys";
-import { extractRevenueCatDailySeries } from "@/lib/sync/revenuecat-series";
+import {
+  describeRevenueCatChartDiagnostics,
+  extractRevenueCatDailySeries,
+  extractRevenueCatMetricValue,
+  hasNonZeroRevenueCatSeries
+} from "@/lib/sync/revenuecat-series";
 import { convertUsdToInr, toFiniteNumber } from "@/lib/sync/money";
 import { enumerateDates, getDefaultSyncDateRange } from "@/lib/sync/dates";
 import { getSyncErrorMessage } from "@/lib/sync/error-message";
@@ -100,6 +105,19 @@ async function fetchChartSeries(
   fetcher: Fetcher,
   options: ChartOptions = {}
 ): Promise<Map<string, number>> {
+  const payload = await fetchChartPayload(projectId, chartName, apiKey, dateFrom, dateTo, fetcher, options);
+  return extractRevenueCatDailySeries(payload, options.preferredKeys);
+}
+
+async function fetchChartPayload(
+  projectId: string,
+  chartName: string,
+  apiKey: string,
+  dateFrom: string,
+  dateTo: string,
+  fetcher: Fetcher,
+  options: ChartOptions = {}
+): Promise<unknown> {
   const url = new URL(`/v2/projects/${encodeURIComponent(projectId)}/charts/${chartName}`, REVENUECAT_BASE_URL);
   url.searchParams.set("start_date", dateFrom);
   url.searchParams.set("end_date", dateTo);
@@ -111,8 +129,67 @@ async function fetchChartSeries(
     url.searchParams.set("selectors", JSON.stringify(options.selectors));
   }
 
+  return revenueCatFetchJson(url.pathname.replace("/v2", "") + url.search, apiKey, fetcher);
+}
+
+async function fetchRevenueMetricValue(
+  projectId: string,
+  apiKey: string,
+  dateFrom: string,
+  dateTo: string,
+  fetcher: Fetcher
+): Promise<number> {
+  const url = new URL(`/v2/projects/${encodeURIComponent(projectId)}/metrics/revenue`, REVENUECAT_BASE_URL);
+  url.searchParams.set("start_date", dateFrom);
+  url.searchParams.set("end_date", dateTo);
+  url.searchParams.set("currency", "USD");
+  url.searchParams.set("revenue_type", "proceeds");
+
   const payload = await revenueCatFetchJson(url.pathname.replace("/v2", "") + url.search, apiKey, fetcher);
-  return extractRevenueCatDailySeries(payload, options.preferredKeys);
+  return extractRevenueCatMetricValue(payload);
+}
+
+async function assertRevenueChartMatchesMetricWhenNeeded({
+  appName,
+  projectId,
+  apiKey,
+  dateFrom,
+  dateTo,
+  fetcher,
+  revenuePayload,
+  revenueSeries,
+  expectedLtvSeries
+}: {
+  appName: string;
+  projectId: string;
+  apiKey: string;
+  dateFrom: string;
+  dateTo: string;
+  fetcher: Fetcher;
+  revenuePayload: unknown;
+  revenueSeries: Map<string, number>;
+  expectedLtvSeries: Map<string, number>;
+}): Promise<void> {
+  if (hasNonZeroRevenueCatSeries(revenueSeries) || !hasNonZeroRevenueCatSeries(expectedLtvSeries)) {
+    return;
+  }
+
+  const chartDiagnostics = describeRevenueCatChartDiagnostics(revenuePayload);
+  let revenueMetricUsd: number;
+
+  try {
+    revenueMetricUsd = await fetchRevenueMetricValue(projectId, apiKey, dateFrom, dateTo, fetcher);
+  } catch (error) {
+    throw new Error(
+      `RevenueCat revenue chart returned only zero daily values for ${appName} (${projectId}) from ${dateFrom} to ${dateTo}, and the metrics/revenue cross-check failed: ${getSyncErrorMessage(error)}. Ensure the RevenueCat V2 key has charts_metrics:overview:read. Chart diagnostics: ${chartDiagnostics}`
+    );
+  }
+
+  if (revenueMetricUsd > 0) {
+    throw new Error(
+      `RevenueCat revenue chart returned only zero daily values for ${appName} (${projectId}) from ${dateFrom} to ${dateTo}, but metrics/revenue returned ${revenueMetricUsd} USD. Check RevenueCat chart selectors or parser support. Chart diagnostics: ${chartDiagnostics}`
+    );
+  }
 }
 
 export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Promise<SyncRunResult> {
@@ -145,12 +222,22 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
 
       const apiKey = getRevenueCatApiKeyForApp(app.app_name, app.revenuecat_project_id);
       const projectId = await resolveProjectId(app.revenuecat_project_id, apiKey, fetcher);
-      const [revenue, expectedLtv, refunds, trials, paidConversions, actives, cancellations] =
+      const revenueOptions = {
+        selectors: { revenue_type: "proceeds" },
+        preferredKeys: ["proceeds", "revenue_net_of_taxes", "revenue", "value", "amount"]
+      };
+      const revenuePayload = await fetchChartPayload(
+        projectId,
+        "revenue",
+        apiKey,
+        dateFrom,
+        dateTo,
+        fetcher,
+        revenueOptions
+      );
+      const revenueSeries = extractRevenueCatDailySeries(revenuePayload, revenueOptions.preferredKeys);
+      const [expectedLtv, refunds, trials, paidConversions, actives, cancellations] =
         await Promise.allSettled([
-          fetchChartSeries(projectId, "revenue", apiKey, dateFrom, dateTo, fetcher, {
-            selectors: { revenue_type: "proceeds" },
-            preferredKeys: ["proceeds", "revenue_net_of_taxes", "revenue", "value", "amount"]
-          }),
           fetchChartSeries(projectId, "prediction_explorer", apiKey, dateFrom, dateTo, fetcher),
           fetchChartSeries(projectId, "refund_rate", apiKey, dateFrom, dateTo, fetcher, {
             selectors: { revenue_type: "proceeds" },
@@ -162,7 +249,6 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
           fetchChartSeries(projectId, "churn", apiKey, dateFrom, dateTo, fetcher)
         ]);
 
-      const revenueSeries = revenue.status === "fulfilled" ? revenue.value : new Map<string, number>();
       const expectedLtvSeries = expectedLtv.status === "fulfilled" ? expectedLtv.value : new Map<string, number>();
       const refundsSeries = refunds.status === "fulfilled" ? refunds.value : new Map<string, number>();
       const trialsSeries = trials.status === "fulfilled" ? trials.value : new Map<string, number>();
@@ -171,6 +257,18 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
       const activesSeries = actives.status === "fulfilled" ? actives.value : new Map<string, number>();
       const cancellationsSeries =
         cancellations.status === "fulfilled" ? cancellations.value : new Map<string, number>();
+
+      await assertRevenueChartMatchesMetricWhenNeeded({
+        appName: app.app_name,
+        projectId,
+        apiKey,
+        dateFrom,
+        dateTo,
+        fetcher,
+        revenuePayload,
+        revenueSeries,
+        expectedLtvSeries
+      });
 
       for (const date of enumerateDates(dateFrom, dateTo)) {
         const revenueInr = convertUsdToInr(revenueSeries.get(date) ?? 0, fxRate);

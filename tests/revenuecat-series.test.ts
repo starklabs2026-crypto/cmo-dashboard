@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractRevenueCatDailySeries } from "@/lib/sync/revenuecat-series";
+import {
+  describeRevenueCatChartDiagnostics,
+  extractRevenueCatDailySeries,
+  extractRevenueCatMetricValue,
+  hasNonZeroRevenueCatSeries
+} from "@/lib/sync/revenuecat-series";
 
 describe("RevenueCat chart series extraction", () => {
   it("uses matching chart measures for array values", () => {
@@ -24,5 +29,31 @@ describe("RevenueCat chart series extraction", () => {
     });
 
     expect(series.get("2026-07-09")).toBe(8.25);
+  });
+
+  it("detects whether a chart series has non-zero values", () => {
+    expect(hasNonZeroRevenueCatSeries(new Map([["2026-07-09", 0]]))).toBe(false);
+    expect(hasNonZeroRevenueCatSeries(new Map([["2026-07-09", 2.5]]))).toBe(true);
+  });
+
+  it("extracts revenue metric totals", () => {
+    expect(extractRevenueCatMetricValue({ value: 123.45 })).toBe(123.45);
+    expect(extractRevenueCatMetricValue({ value: null })).toBe(0);
+  });
+
+  it("describes chart diagnostics without leaking secrets", () => {
+    const diagnostics = describeRevenueCatChartDiagnostics({
+      display_name: "Revenue",
+      values: [],
+      measures: [{ id: "revenue", display_name: "Revenue" }],
+      summary: { value: 0 },
+      user_selectors: { revenue_type: "proceeds", api_key: "sk_test_secret" },
+      unsupported_params: { selectors: ["revenue_type"] }
+    });
+
+    expect(diagnostics).toContain('"values_count":0');
+    expect(diagnostics).toContain('"revenue_type":"proceeds"');
+    expect(diagnostics).toContain('"api_key":"[redacted]"');
+    expect(diagnostics).not.toContain("sk_test_secret");
   });
 });

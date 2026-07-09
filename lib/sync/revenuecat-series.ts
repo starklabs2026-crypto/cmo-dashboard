@@ -2,6 +2,8 @@ import { toFiniteNumber } from "@/lib/sync/money";
 
 const DATE_KEYS = new Set(["date", "start_date", "end_date", "timestamp", "period"]);
 const MEASURE_KEYS = ["id", "key", "name", "display_name", "label", "title"];
+const SENSITIVE_KEY_PATTERN = /api[_-]?key|authorization|secret|token/i;
+const SENSITIVE_VALUE_PATTERN = /^(sk_|Bearer\s+)/i;
 
 function normalizeDateToken(value: unknown): string | null {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -27,6 +29,36 @@ function isNumericCandidate(value: unknown): boolean {
   }
 
   return Number.isFinite(Number(value));
+}
+
+function redactSensitiveValue(key: string, value: unknown): unknown {
+  if (SENSITIVE_KEY_PATTERN.test(key)) {
+    return "[redacted]";
+  }
+
+  if (typeof value === "string" && SENSITIVE_VALUE_PATTERN.test(value)) {
+    return "[redacted]";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveValue("", item));
+  }
+
+  if (value && typeof value === "object") {
+    return redactSensitiveObject(value as Record<string, unknown>);
+  }
+
+  return value;
+}
+
+function redactSensitiveObject(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, redactSensitiveValue(key, value)])
+  );
+}
+
+function getRecordValue(record: Record<string, unknown>, key: string): unknown {
+  return key in record ? redactSensitiveValue(key, record[key]) : undefined;
 }
 
 function normalizeSearchText(value: string): string {
@@ -134,4 +166,40 @@ export function extractRevenueCatDailySeries(
   }
 
   return series;
+}
+
+export function hasNonZeroRevenueCatSeries(series: Map<string, number>): boolean {
+  return [...series.values()].some((value) => Number.isFinite(value) && value !== 0);
+}
+
+export function extractRevenueCatMetricValue(payload: unknown): number {
+  if (!payload || typeof payload !== "object") {
+    return 0;
+  }
+
+  const value = (payload as { value?: unknown }).value;
+  return isNumericCandidate(value) ? toFiniteNumber(value) : 0;
+}
+
+export function describeRevenueCatChartDiagnostics(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return JSON.stringify({ payload_type: typeof payload });
+  }
+
+  const record = payload as Record<string, unknown>;
+  const values = record.values;
+  const diagnostics = {
+    object: getRecordValue(record, "object"),
+    category: getRecordValue(record, "category"),
+    display_name: getRecordValue(record, "display_name"),
+    start_date: getRecordValue(record, "start_date"),
+    end_date: getRecordValue(record, "end_date"),
+    values_count: Array.isArray(values) ? values.length : 0,
+    measures: redactSensitiveValue("measures", record.measures),
+    summary: redactSensitiveValue("summary", record.summary),
+    user_selectors: redactSensitiveValue("user_selectors", record.user_selectors),
+    unsupported_params: redactSensitiveValue("unsupported_params", record.unsupported_params)
+  };
+
+  return JSON.stringify(diagnostics).slice(0, 1500);
 }
