@@ -5,6 +5,7 @@ import { getUsdToInr } from "@/lib/server/env";
 import { getRevenueCatApiKeyForApp } from "@/lib/sync/revenuecat-keys";
 import { convertUsdToInr, toFiniteNumber } from "@/lib/sync/money";
 import { enumerateDates, getDefaultSyncDateRange } from "@/lib/sync/dates";
+import { getSyncErrorMessage } from "@/lib/sync/error-message";
 import { finishSyncRun, startSyncRun, type SyncRunResult } from "@/lib/sync/sync-run";
 
 type Fetcher = typeof fetch;
@@ -278,7 +279,7 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
     await finishSyncRun(supabase, runId, "success", rows.length);
     return { id: runId, source: "revenuecat", status: "success", rowsSynced: rows.length };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown RevenueCat sync error";
+    const message = getSyncErrorMessage(error, "Unknown RevenueCat sync error");
     await finishSyncRun(supabase, runId, "failed", 0, message);
     return { id: runId, source: "revenuecat", status: "failed", rowsSynced: 0, errorMessage: message };
   }

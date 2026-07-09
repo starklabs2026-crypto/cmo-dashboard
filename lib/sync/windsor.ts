@@ -9,6 +9,7 @@ import {
   mapWindsorRowToAppName,
   type AppMapping
 } from "@/lib/sync/app-mapping";
+import { getSyncErrorMessage } from "@/lib/sync/error-message";
 import { finishSyncRun, startSyncRun, type SyncRunResult } from "@/lib/sync/sync-run";
 
 type Fetcher = typeof fetch;
@@ -217,7 +218,7 @@ export async function runWindsorSync(options: WindsorSyncOptions = {}): Promise<
     await finishSyncRun(supabase, runId, "success", rows.length);
     return { id: runId, source: "windsor", status: "success", rowsSynced: rows.length };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown Windsor sync error";
+    const message = getSyncErrorMessage(error, "Unknown Windsor sync error");
     await finishSyncRun(supabase, runId, "failed", 0, message);
     return { id: runId, source: "windsor", status: "failed", rowsSynced: 0, errorMessage: message };
   }
