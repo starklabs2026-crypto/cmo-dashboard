@@ -7,10 +7,25 @@ export function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-export function getDefaultSyncDateRange(daysBack = 30, now = new Date()): DateRange {
+function getDaysInUtcMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
+function subtractUtcMonths(date: Date, monthsBack: number): Date {
+  const targetMonthStart = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - monthsBack, 1)
+  );
+  const year = targetMonthStart.getUTCFullYear();
+  const month = targetMonthStart.getUTCMonth();
+  const day = Math.min(date.getUTCDate(), getDaysInUtcMonth(year, month));
+
+  return new Date(Date.UTC(year, month, day));
+}
+
+export function getDefaultSyncDateRange(monthsBack = 6, now = new Date()): DateRange {
   const dateTo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const dateFrom = new Date(dateTo);
-  dateFrom.setUTCDate(dateFrom.getUTCDate() - daysBack + 1);
+  const dateFrom = subtractUtcMonths(dateTo, monthsBack);
+  dateFrom.setUTCDate(dateFrom.getUTCDate() + 1);
 
   return {
     dateFrom: toIsoDate(dateFrom),
