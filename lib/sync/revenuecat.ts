@@ -158,7 +158,8 @@ async function assertRevenueChartMatchesMetricWhenNeeded({
   fetcher,
   revenuePayload,
   revenueSeries,
-  expectedLtvSeries
+  expectedLtvSeries,
+  preferredKeys
 }: {
   appName: string;
   projectId: string;
@@ -169,12 +170,13 @@ async function assertRevenueChartMatchesMetricWhenNeeded({
   revenuePayload: unknown;
   revenueSeries: Map<string, number>;
   expectedLtvSeries: Map<string, number>;
+  preferredKeys: string[];
 }): Promise<void> {
   if (hasNonZeroRevenueCatSeries(revenueSeries) || !hasNonZeroRevenueCatSeries(expectedLtvSeries)) {
     return;
   }
 
-  const chartDiagnostics = describeRevenueCatChartDiagnostics(revenuePayload);
+  const chartDiagnostics = describeRevenueCatChartDiagnostics(revenuePayload, preferredKeys);
   let revenueMetricUsd: number;
 
   try {
@@ -267,7 +269,8 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
         fetcher,
         revenuePayload,
         revenueSeries,
-        expectedLtvSeries
+        expectedLtvSeries,
+        preferredKeys: revenueOptions.preferredKeys
       });
 
       for (const date of enumerateDates(dateFrom, dateTo)) {

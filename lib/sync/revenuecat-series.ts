@@ -1,6 +1,18 @@
 import { toFiniteNumber } from "@/lib/sync/money";
 
-const DATE_KEYS = new Set(["date", "start_date", "end_date", "timestamp", "period"]);
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DATE_KEYS = new Set([
+  "date",
+  "start_date",
+  "end_date",
+  "timestamp",
+  "time",
+  "start_time",
+  "period",
+  "period_start",
+  "period_end",
+  "x"
+]);
 const MEASURE_KEYS = ["id", "key", "name", "display_name", "label", "title"];
 const POINT_MEASURE_KEYS = [
   "measure",
@@ -21,6 +33,25 @@ const NON_VALUE_KEYS = new Set([...DATE_KEYS, ...POINT_MEASURE_KEYS, "object", "
 const SENSITIVE_KEY_PATTERN = /api[_-]?key|authorization|secret|token/i;
 const SENSITIVE_VALUE_PATTERN = /^(sk_|Bearer\s+)/i;
 
+type DateBounds = {
+  startMs: number | null;
+  endMs: number | null;
+};
+
+type PickedDate = {
+  date: string | null;
+  index: number | null;
+};
+
+type MeasureBase = 0 | 1;
+
+type ArrayMeasureSpec = {
+  position: number;
+  base: MeasureBase;
+  preferredMeasureIndex: number | null;
+  matchedMeasure: string | null;
+};
+
 function normalizeDateToken(value: unknown): string | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     const timestamp = value < 1_000_000_000_000 ? value * 1000 : value;
@@ -33,6 +64,57 @@ function normalizeDateToken(value: unknown): string | null {
 
   const match = value.match(/\d{4}-\d{2}-\d{2}/);
   return match?.[0] ?? null;
+}
+
+function dateTokenToMs(date: string | null): number | null {
+  if (!date) {
+    return null;
+  }
+
+  const value = Date.parse(`${date}T00:00:00.000Z`);
+  return Number.isFinite(value) ? value : null;
+}
+
+function getPayloadDateBounds(payload: unknown): DateBounds {
+  if (!payload || typeof payload !== "object") {
+    return { startMs: null, endMs: null };
+  }
+
+  const record = payload as Record<string, unknown>;
+  return {
+    startMs: dateTokenToMs(normalizeDateToken(record.start_date)),
+    endMs: dateTokenToMs(normalizeDateToken(record.end_date))
+  };
+}
+
+function isSmallNumericDateLike(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) < 1_000_000_000;
+}
+
+function normalizeDateCandidate(value: unknown, bounds: DateBounds): string | null {
+  if (isSmallNumericDateLike(value)) {
+    return null;
+  }
+
+  const date = normalizeDateToken(value);
+  if (!date) {
+    return null;
+  }
+
+  const dateMs = dateTokenToMs(date);
+  if (dateMs === null) {
+    return null;
+  }
+
+  if (bounds.startMs !== null && dateMs < bounds.startMs - DAY_MS) {
+    return null;
+  }
+
+  if (bounds.endMs !== null && dateMs > bounds.endMs + DAY_MS) {
+    return null;
+  }
+
+  return date;
 }
 
 function isNumericCandidate(value: unknown): boolean {
@@ -119,28 +201,13 @@ function describeMeasureValue(value: unknown): string | null {
   return null;
 }
 
-function getArrayMeasureIndexText(point: unknown[], measures: Record<string, unknown>[]): string {
-  const indexCandidate = Number(point[1]);
-  if (!Number.isInteger(indexCandidate)) {
-    return "";
-  }
-
-  const candidateMeasures = [measures[indexCandidate], measures[indexCandidate - 1]].filter(
-    (measure): measure is Record<string, unknown> => Boolean(measure)
-  );
-
-  return candidateMeasures.map(measureText).filter(Boolean).join(" ");
-}
-
-function getPointMeasureText(point: unknown, measures: Record<string, unknown>[]): string {
+function getPointMeasureText(point: unknown): string {
   if (Array.isArray(point)) {
-    const labelText = point
+    return point
       .slice(1)
       .filter((value): value is string => typeof value === "string")
       .filter((value) => !normalizeDateToken(value) && !isNumericCandidate(value))
       .join(" ");
-
-    return labelText || getArrayMeasureIndexText(point, measures);
   }
 
   if (point && typeof point === "object") {
@@ -153,13 +220,117 @@ function getPointMeasureText(point: unknown, measures: Record<string, unknown>[]
   return "";
 }
 
-function isArrayMeasureIndex(point: unknown[], index: number, measures: Record<string, unknown>[]): boolean {
-  if (index !== 1 || measures.length === 0) {
+function getMeasureIndexForBase(value: unknown, base: MeasureBase, measures: Record<string, unknown>[]): number | null {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue)) {
+    return null;
+  }
+
+  const measureIndex = numberValue - base;
+  return measureIndex >= 0 && measureIndex < measures.length ? measureIndex : null;
+}
+
+function getArrayMeasureInfo(
+  point: unknown[],
+  spec: ArrayMeasureSpec,
+  measures: Record<string, unknown>[]
+): { index: number; text: string } | null {
+  const measureIndex = getMeasureIndexForBase(point[spec.position], spec.base, measures);
+  if (measureIndex === null) {
+    return null;
+  }
+
+  return { index: measureIndex, text: measureText(measures[measureIndex]) };
+}
+
+function inferArrayMeasureSpec(
+  values: unknown[],
+  measures: Record<string, unknown>[],
+  preferredKeys: string[]
+): ArrayMeasureSpec | null {
+  if (measures.length === 0) {
+    return null;
+  }
+
+  const scores = new Map<
+    string,
+    {
+      position: number;
+      base: MeasureBase;
+      count: number;
+      preferredCount: number;
+      preferredMeasureIndex: number | null;
+      matchedMeasure: string | null;
+    }
+  >();
+
+  for (const point of values) {
+    if (!Array.isArray(point)) {
+      continue;
+    }
+
+    point.forEach((value, position) => {
+      for (const base of [0, 1] as const) {
+        const measureIndex = getMeasureIndexForBase(value, base, measures);
+        if (measureIndex === null) {
+          continue;
+        }
+
+        const key = `${position}:${base}`;
+        const measure = measures[measureIndex];
+        const text = measureText(measure);
+        const preferred = matchesPreferredMeasureText(text, preferredKeys);
+        const current =
+          scores.get(key) ?? {
+            position,
+            base,
+            count: 0,
+            preferredCount: 0,
+            preferredMeasureIndex: null,
+            matchedMeasure: null
+          };
+
+        current.count += 1;
+        if (preferred) {
+          current.preferredCount += 1;
+          current.preferredMeasureIndex = measureIndex;
+          current.matchedMeasure = text;
+        }
+
+        scores.set(key, current);
+      }
+    });
+  }
+
+  const candidates = [...scores.values()].sort(
+    (left, right) =>
+      right.preferredCount - left.preferredCount ||
+      right.count - left.count ||
+      left.position - right.position ||
+      left.base - right.base
+  );
+  const preferredCandidate = candidates.find((candidate) => candidate.preferredCount > 0);
+  const fallbackCandidate = measures.length === 1 ? candidates[0] : undefined;
+  const selected = preferredCandidate ?? fallbackCandidate;
+
+  if (!selected) {
+    return null;
+  }
+
+  return {
+    position: selected.position,
+    base: selected.base,
+    preferredMeasureIndex: selected.preferredMeasureIndex,
+    matchedMeasure: selected.matchedMeasure
+  };
+}
+
+function isArrayMeasureIndex(point: unknown[], index: number, measureSpec: ArrayMeasureSpec | null): boolean {
+  if (!measureSpec) {
     return false;
   }
 
-  const value = Number(point[index]);
-  return Number.isInteger(value) && Boolean(measures[value] || measures[value - 1]);
+  return index === measureSpec.position;
 }
 
 function getPreferredMeasureValueIndex(payload: unknown, preferredKeys: string[]): number | null {
@@ -181,21 +352,26 @@ function pickNumericValue(
   point: unknown,
   preferredKeys: string[],
   preferredMeasureValueIndex: number | null,
-  measures: Record<string, unknown>[]
+  measureSpec: ArrayMeasureSpec | null,
+  ignoredIndexes: Set<number> = new Set()
 ): number {
   if (Array.isArray(point)) {
     if (
       preferredMeasureValueIndex !== null &&
-      !isArrayMeasureIndex(point, preferredMeasureValueIndex, measures) &&
+      !ignoredIndexes.has(preferredMeasureValueIndex) &&
+      !isArrayMeasureIndex(point, preferredMeasureValueIndex, measureSpec) &&
       isNumericCandidate(point[preferredMeasureValueIndex])
     ) {
       return toFiniteNumber(point[preferredMeasureValueIndex]);
     }
 
     const numeric = point
-      .slice(1)
-      .find((value, index) => !isArrayMeasureIndex(point, index + 1, measures) && isNumericCandidate(value));
-    return toFiniteNumber(numeric);
+      .map((value, index) => ({ value, index }))
+      .find(
+        ({ value, index }) =>
+          !ignoredIndexes.has(index) && !isArrayMeasureIndex(point, index, measureSpec) && isNumericCandidate(value)
+      );
+    return toFiniteNumber(numeric?.value);
   }
 
   if (point && typeof point === "object") {
@@ -215,22 +391,103 @@ function pickNumericValue(
   return 0;
 }
 
-function pickDate(point: unknown): string | null {
+function pickArrayDate(point: unknown[], bounds: DateBounds): PickedDate {
+  const candidates = point
+    .map((value, index) => ({ date: normalizeDateCandidate(value, bounds), value, index }))
+    .filter((candidate): candidate is { date: string; value: unknown; index: number } => Boolean(candidate.date));
+
+  const stringCandidate = candidates.find((candidate) => typeof candidate.value === "string");
+  const timestampCandidate = candidates.find((candidate) => typeof candidate.value === "number");
+  const selected = stringCandidate ?? timestampCandidate;
+  if (selected) {
+    return { date: selected.date, index: selected.index };
+  }
+
+  const fallbackDate =
+    bounds.startMs === null && bounds.endMs === null ? normalizeDateToken(point[0]) : null;
+  return { date: fallbackDate, index: fallbackDate ? 0 : null };
+}
+
+function pickDate(point: unknown, bounds: DateBounds): PickedDate {
   if (Array.isArray(point)) {
-    return normalizeDateToken(point[0]);
+    return pickArrayDate(point, bounds);
   }
 
   if (point && typeof point === "object") {
     const record = point as Record<string, unknown>;
-    return (
-      normalizeDateToken(record.date) ??
-      normalizeDateToken(record.start_date) ??
-      normalizeDateToken(record.timestamp) ??
-      normalizeDateToken(record.period)
-    );
+    for (const key of DATE_KEYS) {
+      const date = normalizeDateCandidate(record[key], bounds) ?? normalizeDateToken(record[key]);
+      if (date) {
+        return { date, index: null };
+      }
+    }
   }
 
-  return null;
+  return { date: null, index: null };
+}
+
+function getArrayValueIndex(
+  point: unknown[],
+  preferredMeasureValueIndex: number | null,
+  measureSpec: ArrayMeasureSpec | null,
+  ignoredIndexes: Set<number>
+): number | null {
+  if (
+    preferredMeasureValueIndex !== null &&
+    !ignoredIndexes.has(preferredMeasureValueIndex) &&
+    !isArrayMeasureIndex(point, preferredMeasureValueIndex, measureSpec) &&
+    isNumericCandidate(point[preferredMeasureValueIndex])
+  ) {
+    return preferredMeasureValueIndex;
+  }
+
+  const match = point
+    .map((value, index) => ({ value, index }))
+    .find(
+      ({ value, index }) =>
+        !ignoredIndexes.has(index) && !isArrayMeasureIndex(point, index, measureSpec) && isNumericCandidate(value)
+    );
+  return match?.index ?? null;
+}
+
+function describeValueShape(
+  values: unknown[],
+  measures: Record<string, unknown>[],
+  bounds: DateBounds,
+  preferredKeys: string[]
+): Record<string, unknown> | null {
+  const arrayValues = values.filter((value): value is unknown[] => Array.isArray(value));
+  if (arrayValues.length === 0) {
+    return null;
+  }
+
+  const measureSpec = inferArrayMeasureSpec(arrayValues, measures, preferredKeys);
+  const preferredPoint =
+    measureSpec?.preferredMeasureIndex !== null && measureSpec?.preferredMeasureIndex !== undefined
+      ? arrayValues.find((point) => getArrayMeasureInfo(point, measureSpec, measures)?.index === measureSpec.preferredMeasureIndex)
+      : undefined;
+  const samplePoint = preferredPoint ?? arrayValues[0];
+  const pickedDate = pickArrayDate(samplePoint, bounds);
+  const ignoredIndexes = new Set<number>();
+  if (pickedDate.index !== null) {
+    ignoredIndexes.add(pickedDate.index);
+  }
+
+  if (measureSpec) {
+    ignoredIndexes.add(measureSpec.position);
+  }
+
+  return {
+    array_lengths: [...new Set(arrayValues.slice(0, 10).map((value) => value.length))],
+    primitive_types: samplePoint.map((value) =>
+      value === null ? "null" : Array.isArray(value) ? "array" : typeof value
+    ),
+    date_index: pickedDate.index,
+    measure_index: measureSpec?.position ?? null,
+    measure_base: measureSpec?.base ?? null,
+    value_index: getArrayValueIndex(samplePoint, null, measureSpec, ignoredIndexes),
+    matched_measure: measureSpec?.matchedMeasure ?? null
+  };
 }
 
 export function extractRevenueCatDailySeries(
@@ -240,25 +497,50 @@ export function extractRevenueCatDailySeries(
   const values = payload && typeof payload === "object" ? (payload as { values?: unknown }).values : undefined;
   const sourceValues = Array.isArray(values) ? values : [];
   const measures = getMeasures(payload);
+  const bounds = getPayloadDateBounds(payload);
   const preferredMeasureValueIndex = getPreferredMeasureValueIndex(payload, preferredKeys);
+  const measureSpec = inferArrayMeasureSpec(sourceValues, measures, preferredKeys);
   const shouldFilterByPointMeasure = sourceValues.some((point) =>
-    matchesPreferredMeasureText(getPointMeasureText(point, measures), preferredKeys)
+    matchesPreferredMeasureText(getPointMeasureText(point), preferredKeys)
   );
+  const shouldFilterByIndexedMeasure =
+    !shouldFilterByPointMeasure && measureSpec !== null && measureSpec.preferredMeasureIndex !== null;
   const series = new Map<string, number>();
 
   for (const point of sourceValues) {
-    const pointMeasureText = getPointMeasureText(point, measures);
+    const pointMeasureText = getPointMeasureText(point);
     if (shouldFilterByPointMeasure && !matchesPreferredMeasureText(pointMeasureText, preferredKeys)) {
       continue;
     }
 
-    const date = pickDate(point);
+    const pickedDate = pickDate(point, bounds);
+    const date = pickedDate.date;
     if (!date) {
       continue;
     }
 
-    const value = pickNumericValue(point, preferredKeys, preferredMeasureValueIndex, measures);
-    series.set(date, shouldFilterByPointMeasure ? (series.get(date) ?? 0) + value : value);
+    const ignoredIndexes = new Set<number>();
+    if (pickedDate.index !== null) {
+      ignoredIndexes.add(pickedDate.index);
+    }
+
+    if (Array.isArray(point) && measureSpec) {
+      const measureInfo = getArrayMeasureInfo(point, measureSpec, measures);
+      ignoredIndexes.add(measureSpec.position);
+
+      if (
+        shouldFilterByIndexedMeasure &&
+        measureInfo?.index !== measureSpec.preferredMeasureIndex
+      ) {
+        continue;
+      }
+    }
+
+    const value = pickNumericValue(point, preferredKeys, preferredMeasureValueIndex, measureSpec, ignoredIndexes);
+    series.set(
+      date,
+      shouldFilterByPointMeasure || shouldFilterByIndexedMeasure ? (series.get(date) ?? 0) + value : value
+    );
   }
 
   return series;
@@ -277,13 +559,19 @@ export function extractRevenueCatMetricValue(payload: unknown): number {
   return isNumericCandidate(value) ? toFiniteNumber(value) : 0;
 }
 
-export function describeRevenueCatChartDiagnostics(payload: unknown): string {
+export function describeRevenueCatChartDiagnostics(
+  payload: unknown,
+  preferredKeys: string[] = ["value", "amount", "revenue", "proceeds", "count"]
+): string {
   if (!payload || typeof payload !== "object") {
     return JSON.stringify({ payload_type: typeof payload });
   }
 
   const record = payload as Record<string, unknown>;
   const values = record.values;
+  const sourceValues = Array.isArray(values) ? values : [];
+  const measures = getMeasures(payload);
+  const bounds = getPayloadDateBounds(payload);
   const diagnostics = {
     object: getRecordValue(record, "object"),
     category: getRecordValue(record, "category"),
@@ -291,6 +579,7 @@ export function describeRevenueCatChartDiagnostics(payload: unknown): string {
     start_date: getRecordValue(record, "start_date"),
     end_date: getRecordValue(record, "end_date"),
     values_count: Array.isArray(values) ? values.length : 0,
+    value_shape: describeValueShape(sourceValues, measures, bounds, preferredKeys),
     measures: redactSensitiveValue("measures", record.measures),
     summary: redactSensitiveValue("summary", record.summary),
     user_selectors: redactSensitiveValue("user_selectors", record.user_selectors),
