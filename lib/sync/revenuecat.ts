@@ -3,6 +3,7 @@ import "server-only";
 import { createSupabaseAdmin } from "@/lib/supabase/server";
 import { getUsdToInr } from "@/lib/server/env";
 import { getRevenueCatApiKeyForApp } from "@/lib/sync/revenuecat-keys";
+import { extractRevenueCatDailySeries } from "@/lib/sync/revenuecat-series";
 import { convertUsdToInr, toFiniteNumber } from "@/lib/sync/money";
 import { enumerateDates, getDefaultSyncDateRange } from "@/lib/sync/dates";
 import { getSyncErrorMessage } from "@/lib/sync/error-message";
@@ -24,89 +25,13 @@ type AppRow = {
 
 type ChartOptions = {
   selectors?: Record<string, string>;
+  preferredKeys?: string[];
 };
 
 const REVENUECAT_BASE_URL = "https://api.revenuecat.com/v2";
 
 function isLikelyRevenueCatProjectId(value: string): boolean {
   return /^proj[a-z0-9_]+/i.test(value);
-}
-
-function normalizeDateToken(value: unknown): string | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const timestamp = value < 1_000_000_000_000 ? value * 1000 : value;
-    return new Date(timestamp).toISOString().slice(0, 10);
-  }
-
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const match = value.match(/\d{4}-\d{2}-\d{2}/);
-  return match?.[0] ?? null;
-}
-
-function pickNumericValue(point: unknown, preferredKeys: string[]): number {
-  if (Array.isArray(point)) {
-    const numeric = point.slice(1).find((item) => Number.isFinite(Number(item)));
-    return toFiniteNumber(numeric);
-  }
-
-  if (point && typeof point === "object") {
-    const record = point as Record<string, unknown>;
-    for (const key of preferredKeys) {
-      if (key in record) {
-        return toFiniteNumber(record[key]);
-      }
-    }
-
-    const fallback = Object.entries(record).find(
-      ([key, value]) =>
-        !["date", "start_date", "end_date", "timestamp", "period"].includes(key) &&
-        Number.isFinite(Number(value))
-    );
-    return toFiniteNumber(fallback?.[1]);
-  }
-
-  return 0;
-}
-
-function pickDate(point: unknown): string | null {
-  if (Array.isArray(point)) {
-    return normalizeDateToken(point[0]);
-  }
-
-  if (point && typeof point === "object") {
-    const record = point as Record<string, unknown>;
-    return (
-      normalizeDateToken(record.date) ??
-      normalizeDateToken(record.start_date) ??
-      normalizeDateToken(record.timestamp) ??
-      normalizeDateToken(record.period)
-    );
-  }
-
-  return null;
-}
-
-export function extractRevenueCatDailySeries(
-  payload: unknown,
-  preferredKeys: string[] = ["value", "amount", "revenue", "proceeds", "count"]
-): Map<string, number> {
-  const values = payload && typeof payload === "object" ? (payload as { values?: unknown }).values : undefined;
-  const sourceValues = Array.isArray(values) ? values : [];
-  const series = new Map<string, number>();
-
-  for (const point of sourceValues) {
-    const date = pickDate(point);
-    if (!date) {
-      continue;
-    }
-
-    series.set(date, pickNumericValue(point, preferredKeys));
-  }
-
-  return series;
 }
 
 async function revenueCatFetchJson(
@@ -187,7 +112,7 @@ async function fetchChartSeries(
   }
 
   const payload = await revenueCatFetchJson(url.pathname.replace("/v2", "") + url.search, apiKey, fetcher);
-  return extractRevenueCatDailySeries(payload);
+  return extractRevenueCatDailySeries(payload, options.preferredKeys);
 }
 
 export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Promise<SyncRunResult> {
@@ -223,11 +148,13 @@ export async function runRevenueCatSync(options: RevenueCatSyncOptions = {}): Pr
       const [revenue, expectedLtv, refunds, trials, paidConversions, actives, cancellations] =
         await Promise.allSettled([
           fetchChartSeries(projectId, "revenue", apiKey, dateFrom, dateTo, fetcher, {
-            selectors: { revenue_type: "proceeds" }
+            selectors: { revenue_type: "proceeds" },
+            preferredKeys: ["proceeds", "revenue_net_of_taxes", "revenue", "value", "amount"]
           }),
           fetchChartSeries(projectId, "prediction_explorer", apiKey, dateFrom, dateTo, fetcher),
           fetchChartSeries(projectId, "refund_rate", apiKey, dateFrom, dateTo, fetcher, {
-            selectors: { revenue_type: "proceeds" }
+            selectors: { revenue_type: "proceeds" },
+            preferredKeys: ["proceeds", "refund", "refunds", "value", "amount"]
           }),
           fetchChartSeries(projectId, "trials_new", apiKey, dateFrom, dateTo, fetcher),
           fetchChartSeries(projectId, "actives_new", apiKey, dateFrom, dateTo, fetcher),
