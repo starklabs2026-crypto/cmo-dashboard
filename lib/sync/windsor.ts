@@ -11,6 +11,10 @@ import {
 } from "@/lib/sync/app-mapping";
 import { getSyncErrorMessage } from "@/lib/sync/error-message";
 import { finishSyncRun, startSyncRun, type SyncRunResult } from "@/lib/sync/sync-run";
+import {
+  aggregateWindsorAdSpendRows,
+  type WindsorAdSpendRow
+} from "@/lib/sync/windsor-rows";
 
 type Fetcher = typeof fetch;
 
@@ -158,7 +162,7 @@ export async function runWindsorSync(options: WindsorSyncOptions = {}): Promise<
     const mappings = createMappingsFromApps(appRows);
     const appIdByName = new Map(appRows.map((app) => [app.app_name, app.id]));
     const windsorRows = await fetchWindsorRows(apiKey, dateFrom, dateTo, fetcher);
-    const rows = [];
+    const rows: WindsorAdSpendRow[] = [];
 
     for (const row of windsorRows) {
       if (!row.date) {
@@ -204,8 +208,10 @@ export async function runWindsorSync(options: WindsorSyncOptions = {}): Promise<
       });
     }
 
-    if (rows.length > 0) {
-      const { error } = await supabase.from("daily_ad_spend").upsert(rows, {
+    const aggregatedRows = aggregateWindsorAdSpendRows(rows);
+
+    if (aggregatedRows.length > 0) {
+      const { error } = await supabase.from("daily_ad_spend").upsert(aggregatedRows, {
         onConflict:
           "date,app_id,source,medium,campaign,campaign_id,ad_group,ad_group_id,keyword,country"
       });
@@ -215,8 +221,8 @@ export async function runWindsorSync(options: WindsorSyncOptions = {}): Promise<
       }
     }
 
-    await finishSyncRun(supabase, runId, "success", rows.length);
-    return { id: runId, source: "windsor", status: "success", rowsSynced: rows.length };
+    await finishSyncRun(supabase, runId, "success", aggregatedRows.length);
+    return { id: runId, source: "windsor", status: "success", rowsSynced: aggregatedRows.length };
   } catch (error) {
     const message = getSyncErrorMessage(error, "Unknown Windsor sync error");
     await finishSyncRun(supabase, runId, "failed", 0, message);
